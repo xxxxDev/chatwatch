@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>chatwatch</title>
+<style>
+:root { --bg:#fff; --fg:#1d1d1f; --muted:#6e6e73; --line:#e3e3e8; --card:#f6f6f8; --accent:#4b53bc; --on-accent:#fff; --warn:#b3261e; }
+@media (prefers-color-scheme: dark) {
+  :root { --bg:#151517; --fg:#ececf0; --muted:#9a9aa2; --line:#2c2c31; --card:#1e1e22; --accent:#8f95f0; --on-accent:#151517; --warn:#ff8a80; }
+}
+* { box-sizing: border-box; }
+body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.5 -apple-system, "Segoe UI", system-ui, sans-serif; }
+main { max-width: 920px; margin: 0 auto; padding: 16px; }
+header { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+h1 { font-size: 20px; margin: 0; }
+h2 { font-size: 16px; margin: 24px 0 8px; }
+.muted { color: var(--muted); font-size: 13px; }
+.warn { color: var(--warn); }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; margin-bottom: 10px; }
+textarea { width: 100%; min-height: 80px; font: inherit; color: inherit; background: var(--bg); border:1px solid var(--line); border-radius: 8px; padding: 8px; }
+button, select { font: inherit; color: inherit; background: var(--bg); border:1px solid var(--line); border-radius: 8px; padding: 4px 10px; cursor: pointer; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
+table { width: 100%; border-collapse: collapse; }
+td, th { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+th { font-weight: 600; font-size: 13px; color: var(--muted); }
+.row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:8px; }
+.ev { font-size: 13px; padding: 4px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.dot { display:inline-block; width:8px; height:8px; border-radius:50%; background:var(--accent); margin-right:6px; }
+@media (max-width: 600px) { .hide-sm { display:none; } }
+#screen { position: relative; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: #000; outline: none; }
+#screen.operating { box-shadow: 0 0 0 3px var(--warn); }
+#screen img { display: block; width: 100%; height: auto; user-select: none; -webkit-user-drag: none; }
+#screen .empty { color: #aaa; padding: 40px 16px; text-align: center; }
+#typebar input { flex: 1; min-width: 0; font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 4px 8px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>chatwatch · Teams</h1>
+    <span id="status" class="muted"></span>
+    <button id="pause"></button>
+  </header>
+  <p id="nokey" class="warn" hidden>Open this page with the address from <code>python3 -m chatwatch open</code>.</p>
+
+  <h2>Teams screen</h2>
+  <div class="row" style="margin:0 0 8px">
+    <button id="showScreen">Show</button>
+    <button id="operate" hidden>Start operating</button>
+    <button id="reload" hidden>Reload Teams</button>
+    <span id="screenNote" class="muted"></span>
+  </div>
+  <div id="screen" tabindex="0" hidden><div class="empty">Loading…</div></div>
+  <div id="typebar" class="row" hidden>
+    <input id="typeText" placeholder="Type into Teams" autocomplete="off">
+    <button id="typeSend">Type</button><button data-key="Enter">Enter</button><button data-key="Backspace">⌫</button><button data-key="Tab">Tab</button>
+  </div>
+  <p class="muted">What chatwatch's Chrome shows, also when it runs without a window. Use it to sign in again when Teams asks. While you operate, a send waits for you.</p>
+
+  <h2>Drafts</h2>
+  <div id="drafts"><p class="muted">None.</p></div>
+
+  <h2>Chats</h2>
+  <table>
+    <thead><tr><th>Chat</th><th>Watch</th><th>Send</th><th class="hide-sm">Handler</th></tr></thead>
+    <tbody id="chats"></tbody>
+  </table>
+  <p class="muted">Send: <b>draft</b> keeps what agents write here for you to send; <b>auto</b> sends it at once; <b>off</b> refuses it.</p>
+
+  <h2>Recent</h2>
+  <div id="events"></div>
+</main>
+<script>
+const m = location.hash.match(/key=([^&]+)/);
+try { if (m) { sessionStorage.setItem('chatwatch-key', m[1]); history.replaceState(null, '', location.pathname); } } catch (e) {}
+let KEY = m ? m[1] : null;
+try { KEY = KEY || sessionStorage.getItem('chatwatch-key'); } catch (e) {}
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function api(path, body) {
+  const r = await fetch('/api/' + path, body === undefined ? {headers: {'X-Chatwatch-Key': KEY}} :
+    {method: 'POST', headers: {'X-Chatwatch-Key': KEY, 'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+  const v = await r.json();
+  if (!r.ok) throw new Error(v.error || r.status);
+  return v;
+}
+
+let handlers = [], paused = false;
+async function loadStatus() {
+  const s = await api('status');
+  handlers = s.handlers; paused = s.paused;
+  $('status').innerHTML = s.paused ? 'paused' : s.error ? '<span class="warn">' + esc(s.error) + '</span>'
+    : s.last_poll ? 'watching · ' + new Date(s.last_poll * 1000).toLocaleTimeString() : 'starting…';
+  $('pause').textContent = s.paused ? 'Resume' : 'Pause';
+}
+$('pause').onclick = async () => { await api('pause', {paused: !paused}); loadStatus(); };
+
+async function loadDrafts() {
+  const {drafts} = await api('drafts');
+  $('drafts').innerHTML = drafts.length ? '' : '<p class="muted">None.</p>';
+  for (const d of drafts) {
+    const el = document.createElement('div'); el.className = 'card';
+    el.innerHTML = '<div><b>' + esc(d.chat) + '</b> <span class="muted">' + esc(d.source) + ' · ' + esc(d.created) + '</span></div>'
+      + (d.error ? '<div class="warn muted">' + esc(d.error) + '</div>' : '')
+      + '<textarea></textarea>'
+      + (d.files && d.files.length ? '<div class="muted">Files: ' + d.files.map(esc).join(', ') + '</div>' : '')
+      + (d.uncertain ? '<label class="row warn"><input type="checkbox"> This may already have been sent. I checked the chat.</label>' : '')
+      + '<div class="row"><button class="primary">Send</button><button>Discard</button></div>';
+    el.querySelector('textarea').value = d.text;
+    const [send, discard] = el.querySelectorAll('.row button');
+    send.onclick = async () => {
+      send.disabled = true;
+      try {
+        const box = el.querySelector('input[type=checkbox]');
+        const r = await api('drafts/' + d.id + '/send', {text: el.querySelector('textarea').value, checked: !!(box && box.checked)});
+        if (r.status !== 'sent') alert(r.status + ': ' + (r.error || ''));
+      } catch (e) { alert(e.message); }
+      loadDrafts(); loadEvents();
+    };
+    discard.onclick = async () => { if (confirm('Discard this draft?')) { await api('drafts/' + d.id + '/discard', {}); loadDrafts(); } };
+    $('drafts').appendChild(el);
+  }
+}
+
+async function loadChats(refresh) {
+  const {chats} = await api('chats' + (refresh ? '?refresh=1' : ''));
+  const tb = $('chats'); tb.innerHTML = '';
+  for (const c of chats) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td>' + (c.unread ? '<span class="dot"></span>' : '') + esc(c.title) + '<div class="muted">' + esc(c.preview).slice(0, 80) + '</div></td>'
+      + '<td><input type="checkbox"' + (c.watch ? ' checked' : '') + '></td>'
+      + '<td><select>' + ['draft', 'auto', 'off'].map((v) => '<option' + (v === c.send ? ' selected' : '') + '>' + v + '</option>').join('') + '</select></td>'
+      + '<td class="hide-sm"><select><option value="">none</option>' + handlers.map((h) => '<option' + (h === c.handler ? ' selected' : '') + '>' + esc(h) + '</option>').join('') + '</select></td>';
+    const [watch] = tr.querySelectorAll('input'), [send, handler] = tr.querySelectorAll('select');
+    const save = async (change) => { try { await api('chats/' + encodeURIComponent(c.id), change); } catch (e) { alert(e.message); loadChats(); } };
+    watch.onchange = () => save({watch: watch.checked});
+    send.onchange = () => { if (send.value !== 'auto' || confirm('Agents will send to "' + c.title + '" without you seeing it first. OK?')) save({send: send.value}); else send.value = c.send; };
+    handler.onchange = () => save({handler: handler.value});
+    tb.appendChild(tr);
+  }
+}
+
+async function loadEvents() {
+  const {events} = await api('events?after=0');
+  $('events').innerHTML = events.slice(-30).reverse().map((e) => {
+    const what = e.type === 'message' ? e.messages.map((m) => esc(m.author) + ': ' + esc(m.text)).join(' / ')
+      : esc(e.text || e.error || e.reason || '');
+    return '<div class="ev"><span class="muted">' + esc(e.ts) + ' · ' + esc(e.type) + ' · ' + esc(e.chat || '') + '</span><br>' + what + '</div>';
+  }).join('') || '<p class="muted">Nothing yet.</p>';
+}
+
+// ---------- live view of the Teams tab ----------
+let showing = false, operating = false, shot = null, timer = null;
+const screenEl = $('screen');
+async function loadScreen() {
+  clearTimeout(timer);
+  if (!showing) return;
+  if (document.visibilityState === 'visible') {
+    try {
+      shot = await api('screen');
+      let img = screenEl.querySelector('img');
+      if (!img) { screenEl.innerHTML = '<img alt="Teams">'; img = screenEl.querySelector('img'); }
+      img.src = 'data:image/jpeg;base64,' + shot.data;
+      $('screenNote').textContent = shot.host || '';
+    } catch (e) { $('screenNote').textContent = e.message; }
+  }
+  timer = setTimeout(loadScreen, operating ? 500 : 1500);
+}
+async function send(event) {
+  try { await api('screen/input', event); } catch (e) { $('screenNote').textContent = e.message; }
+  setTimeout(loadScreen, 150);
+}
+function at(ev) {  // a point on the picture, in the Teams page's CSS pixels
+  const r = screenEl.querySelector('img').getBoundingClientRect();
+  return {x: (ev.clientX - r.left) * shot.width / r.width, y: (ev.clientY - r.top) * shot.height / r.height};
+}
+$('showScreen').onclick = () => {
+  showing = !showing;
+  $('showScreen').textContent = showing ? 'Hide' : 'Show';
+  screenEl.hidden = $('operate').hidden = $('reload').hidden = !showing;
+  if (!showing && operating) $('operate').onclick();
+  loadScreen();
+};
+$('operate').onclick = () => {
+  operating = !operating;
+  $('operate').textContent = operating ? 'Stop operating' : 'Start operating';
+  screenEl.classList.toggle('operating', operating);
+  $('typebar').hidden = !operating;
+  if (operating) screenEl.focus();
+};
+$('reload').onclick = () => { if (confirm('Reload the Teams page?')) send({type: 'reload'}); };
+screenEl.addEventListener('click', (ev) => { if (operating && shot && ev.target.tagName === 'IMG') send(Object.assign({type: 'click'}, at(ev))); });
+screenEl.addEventListener('wheel', (ev) => {
+  if (!operating || !shot || ev.target.tagName !== 'IMG') return;
+  ev.preventDefault();
+  send(Object.assign({type: 'wheel', dx: ev.deltaX, dy: ev.deltaY}, at(ev)));
+}, {passive: false});
+const KEYS = ['Backspace', 'Tab', 'Enter', 'Escape', 'PageUp', 'PageDown', 'End', 'Home', 'ArrowLeft', 'ArrowUp', 'ArrowRight', 'ArrowDown', 'Delete'];
+screenEl.addEventListener('keydown', (ev) => {
+  if (!operating) return;
+  const mods = (ev.altKey ? 1 : 0) | (ev.ctrlKey ? 2 : 0) | (ev.metaKey ? 4 : 0) | (ev.shiftKey ? 8 : 0);
+  if (KEYS.includes(ev.key)) { ev.preventDefault(); send({type: 'key', key: ev.key, modifiers: mods}); }
+  else if (ev.key.length === 1 && !ev.ctrlKey && !ev.metaKey) { ev.preventDefault(); send({type: 'text', text: ev.key}); }
+});
+screenEl.addEventListener('paste', (ev) => {
+  if (!operating) return;
+  ev.preventDefault();
+  send({type: 'text', text: ev.clipboardData.getData('text/plain')});
+});
+$('typeSend').onclick = () => { const t = $('typeText').value; if (t) { send({type: 'text', text: t}); $('typeText').value = ''; } };
+for (const b of document.querySelectorAll('#typebar [data-key]')) b.onclick = () => send({type: 'key', key: b.dataset.key});
+document.addEventListener('visibilitychange', loadScreen);
+
+async function refresh() {
+  // Do not redraw the drafts while one is being edited.
+  const editing = $('drafts').contains(document.activeElement);
+  try { await loadStatus(); if (!editing) await loadDrafts(); await loadEvents(); } catch (e) { $('status').textContent = e.message; }
+}
+if (!KEY) $('nokey').hidden = false;
+else { refresh().then(() => loadChats(true)).catch(() => {}); setInterval(refresh, 5000); }
+</script>
+</body>
+</html>

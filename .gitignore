@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.chatwatch/
+build/
+dist/
+*.egg-info/
+.DS_Store
