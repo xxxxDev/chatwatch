@@ -1,8 +1,8 @@
 # Changelog
 
-## 0.1.0
+## v2026.11.11
 
-First release.
+First open-source release.
 
 - Reads Teams chats through Teams' own chat service API inside the tab, so nothing is marked read; the access token never leaves the tab.
 - Sends by pasting the whole text, attaching files and confirming the message appeared; reports `not_sent` and `maybe_sent` apart.
